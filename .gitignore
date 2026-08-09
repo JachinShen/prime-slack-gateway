@@ -1,0 +1,7 @@
+node_modules/
+coverage/
+.DS_Store
+.env
+*.local.json
+slack-gateway.json
+slack-sessions/

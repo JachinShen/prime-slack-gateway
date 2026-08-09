@@ -1,0 +1,10 @@
+{
+  "botToken": "xoxb-replace-me",
+  "appToken": "xapp-replace-me",
+  "allowedUsers": [
+    "U12345678"
+  ],
+  "concurrency": 4,
+  "cwd": "/Users/you/project",
+  "sessionRoot": "/Users/you/.prime/agent/slack-sessions"
+}

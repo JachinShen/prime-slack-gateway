@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Prime Agent Slack Gateway configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "botToken": {
+      "type": "string",
+      "description": "Slack bot token (xoxb-...). Keep this file mode 0600."
+    },
+    "appToken": {
+      "type": "string",
+      "description": "Slack app-level token (xapp-...). Keep this file mode 0600."
+    },
+    "allowedUsers": {
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Comma-separated Slack user IDs; * intentionally allows everyone."
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "default": []
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "default": 4
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Working directory for spawned Prime Agent sessions."
+    },
+    "sessionRoot": {
+      "type": "string",
+      "description": "Directory containing isolated Slack thread sessions."
+    }
+  },
+  "required": [
+    "botToken",
+    "appToken",
+    "allowedUsers"
+  ]
+}

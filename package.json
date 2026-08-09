@@ -1,0 +1,27 @@
+{
+  "name": "prime-slack-gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@slack/socket-mode": "^2.0.2",
+    "@slack/web-api": "^7.9.0"
+  },
+  "description": "Prime Agent 0.7-native Slack Socket Mode gateway with per-thread RPC sessions",
+  "license": "MIT",
+  "author": "Jachin Shen",
+  "files": [
+    "index.js",
+    "slack-gateway.schema.json",
+    "slack-gateway.example.json",
+    "README.md",
+    "LICENSE",
+    "test"
+  ]
+}
