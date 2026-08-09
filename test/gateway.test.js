@@ -110,6 +110,24 @@ test("posts a safe error reply when a thread turn fails", async () => {
   assert.equal(g.status().failed, 1);
 });
 
+test("adds and removes a processing reaction around a turn", async () => {
+  const reactions = [];
+  const q = new ThreadQueue({ concurrency: 1, handler: async () => "done" });
+  const g = createGateway({
+    botUserId: "B1",
+    allowlist: new Set(["U1"]),
+    queue: q,
+    runPrime: async () => "unused",
+    post: async () => {},
+    processingReaction: async event => reactions.push(event),
+  });
+  await g.onMessage({ user: "U1", channel: "C1", ts: "40", text: "<@B1> work" });
+  assert.deepEqual(reactions, [
+    { channel: "C1", timestamp: "40", active: true },
+    { channel: "C1", timestamp: "40", active: false },
+  ]);
+});
+
 test("queue limits parallel work", async () => {
   let active=0, peak=0;
   const q = new ThreadQueue({ concurrency: 2, handler: async () => { active++; peak=Math.max(peak,active); await new Promise(r=>setTimeout(r,10)); active--; return "ok"; } });

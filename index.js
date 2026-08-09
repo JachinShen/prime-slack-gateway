@@ -323,7 +323,7 @@ function formatGatewayError(error) {
     .slice(0, 500);
 }
 
-export function createGateway({ botUserId, allowlist, queue, runPrime, post, logger = () => {}, requireThreadReplies = true }) {
+export function createGateway({ botUserId, allowlist, queue, runPrime, post, logger = () => {}, processingReaction, requireThreadReplies = true }) {
   if (!botUserId || !queue || !runPrime || !post) throw new Error("botUserId, queue, runPrime, and post are required");
   const sessions = new Set();
   const keyTails = new Map();
@@ -348,9 +348,28 @@ export function createGateway({ botUserId, allowlist, queue, runPrime, post, log
     const previous = keyTails.get(key) || Promise.resolve();
     const current = previous.catch(() => {}).then(() => queue.push({ key, prompt }));
     keyTails.set(key, current);
-    let result;
+    const updateProcessingReaction = async active => {
+      if (!processingReaction || !event.ts) return;
+      try {
+        await processingReaction({ channel: event.channel, timestamp: event.ts, active });
+      } catch (error) {
+        logger(`processing reaction ${active ? "add" : "remove"} failed: ${formatGatewayError(error)}`);
+      }
+    };
+    await updateProcessingReaction(true);
     try {
-      result = await current;
+      const result = await current;
+      try {
+        await post({ channel: event.channel, thread_ts: event.thread_ts || event.ts, text: result || "(Prime Agent returned no text.)" });
+        stats.handled++;
+        return { handled: true, key };
+      } catch (error) {
+        const detail = formatGatewayError(error);
+        stats.failed++;
+        stats.lastError = detail;
+        logger(`gateway reply failed: ${detail}`);
+        return { failed: true, key, error: detail };
+      }
     } catch (error) {
       const detail = formatGatewayError(error);
       stats.failed++;
@@ -366,18 +385,8 @@ export function createGateway({ botUserId, allowlist, queue, runPrime, post, log
       }
       return { failed: true, key, error: detail };
     } finally {
+      await updateProcessingReaction(false);
       if (keyTails.get(key) === current) keyTails.delete(key);
-    }
-    try {
-      await post({ channel: event.channel, thread_ts: event.thread_ts || event.ts, text: result || "(Prime Agent returned no text.)" });
-      stats.handled++;
-      return { handled: true, key };
-    } catch (error) {
-      const detail = formatGatewayError(error);
-      stats.failed++;
-      stats.lastError = detail;
-      logger(`gateway reply failed: ${detail}`);
-      return { failed: true, key, error: detail };
     }
   }
   return {
@@ -442,7 +451,20 @@ export async function startSocketGateway(options = {}) {
   };
   const runPrime = options.runPrime || createPrimeRunner({ cwd, sessionRoot, onEvent: mirrorToolEvent });
   const queue = options.queue || new ThreadQueue({ concurrency: options.concurrency ?? config.concurrency ?? 4, handler: ({ key, prompt }) => runPrime(key, prompt) });
-  const gateway = createGateway({ ...options, botUserId: options.botUserId || auth.user_id, allowlist: parseAllowlist(allowedUsers), queue, post: message => web.chat.postMessage(message), runPrime });
+  const gateway = createGateway({
+    ...options,
+    botUserId: options.botUserId || auth.user_id,
+    allowlist: parseAllowlist(allowedUsers),
+    queue,
+    post: message => web.chat.postMessage(message),
+    runPrime,
+    processingReaction: ({ channel, timestamp, active }) =>
+      web.reactions[active ? "add" : "remove"]({
+        channel,
+        timestamp,
+        name: "hourglass_flowing_sand",
+      }),
+  });
   registerSocketEventHandlers(socket, gateway, options.logger);
   await socket.start();
   return {

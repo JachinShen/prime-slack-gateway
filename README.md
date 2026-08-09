@@ -9,6 +9,7 @@ A small, Prime Agent 0.7-native Slack Socket Mode adapter.
 - Replies stay in the originating Slack thread.
 - One persistent Prime Agent RPC session per Slack thread.
 - Same-thread turns are serialized; different threads run concurrently.
+- A temporary `hourglass_flowing_sand` reaction marks each incoming message as processing.
 - Tool activity is mirrored into the Slack thread as start/finish updates.
 - Explicit start, status, and stop commands.
 - Owner-only config validation (`0600`) and fail-closed user allowlist.
@@ -18,7 +19,7 @@ A small, Prime Agent 0.7-native Slack Socket Mode adapter.
 
 - Prime Agent 0.7 with extension auto-discovery.
 - Node.js 18+ (Node 22 recommended).
-- A Slack app with Socket Mode enabled, `chat:write`, and the relevant message event subscriptions (`message.im`, `message.channels`, optionally `message.groups` and `app_mention`).
+- A Slack app with Socket Mode enabled, `chat:write`, `reactions:write`, and the relevant message event subscriptions (`message.im`, `message.channels`, optionally `message.groups` and `app_mention`).
 - Bot and app-level tokens.
 
 ## Install as a Prime Agent extension
