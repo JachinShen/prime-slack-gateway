@@ -145,6 +145,12 @@ export function primeSlackGatewayExtension(pi) {
       }
     },
   });
+  if (typeof pi.on === "function") {
+    pi.on("session_shutdown", async () => {
+      try { await running?.stop?.(); } catch { /* best-effort cleanup during host shutdown */ }
+      running = undefined;
+    });
+  }
 }
 export default primeSlackGatewayExtension;
 
@@ -295,17 +301,33 @@ export function createPrimeRunner({ primeCommand = "prime-agent", cwd, sessionRo
     });
   };
   run.close = async () => {
-    for (const state of sessions.values()) state.child.kill("SIGTERM");
+    const states = [...sessions.values()];
     sessions.clear();
+    await Promise.all(states.map(state => new Promise(resolve => {
+      if (state.closed) return resolve();
+      const done = () => resolve();
+      state.child.once("close", done);
+      state.child.kill("SIGTERM");
+      setTimeout(done, 2_000);
+    })));
   };
   return run;
+}
+
+function formatGatewayError(error) {
+  const raw = error instanceof Error ? error.message : String(error ?? "Unknown error");
+  return raw
+    .replace(/xox[baprs]-[A-Za-z0-9-]+/g, "[redacted-token]")
+    .replace(/xapp-[A-Za-z0-9-]+/g, "[redacted-token]")
+    .replace(/(?:file:\/\/)?\/(?:Users|home|private|var|tmp)\/[^\s)]+/g, "[local-path]")
+    .slice(0, 500);
 }
 
 export function createGateway({ botUserId, allowlist, queue, runPrime, post, logger = () => {}, requireThreadReplies = true }) {
   if (!botUserId || !queue || !runPrime || !post) throw new Error("botUserId, queue, runPrime, and post are required");
   const sessions = new Set();
   const keyTails = new Map();
-  const stats = { received: 0, handled: 0, ignored: 0, ignoredByReason: {} };
+  const stats = { received: 0, handled: 0, failed: 0, ignored: 0, ignoredByReason: {}, lastError: null };
   const ignored = reason => {
     stats.ignored++;
     stats.ignoredByReason[reason] = (stats.ignoredByReason[reason] || 0) + 1;
@@ -329,12 +351,34 @@ export function createGateway({ botUserId, allowlist, queue, runPrime, post, log
     let result;
     try {
       result = await current;
+    } catch (error) {
+      const detail = formatGatewayError(error);
+      stats.failed++;
+      stats.lastError = detail;
+      try {
+        await post({
+          channel: event.channel,
+          thread_ts: event.thread_ts || event.ts,
+          text: `⚠️ Prime Agent failed: ${detail}\nPlease retry this message.`,
+        });
+      } catch (postError) {
+        logger(`gateway error reply failed: ${formatGatewayError(postError)}`);
+      }
+      return { failed: true, key, error: detail };
     } finally {
       if (keyTails.get(key) === current) keyTails.delete(key);
     }
-    await post({ channel: event.channel, thread_ts: event.thread_ts || event.ts, text: result || "(Prime Agent returned no text.)" });
-    stats.handled++;
-    return { handled: true, key };
+    try {
+      await post({ channel: event.channel, thread_ts: event.thread_ts || event.ts, text: result || "(Prime Agent returned no text.)" });
+      stats.handled++;
+      return { handled: true, key };
+    } catch (error) {
+      const detail = formatGatewayError(error);
+      stats.failed++;
+      stats.lastError = detail;
+      logger(`gateway reply failed: ${detail}`);
+      return { failed: true, key, error: detail };
+    }
   }
   return {
     onMessage,
@@ -404,7 +448,12 @@ export async function startSocketGateway(options = {}) {
   return {
     socket,
     gateway,
-    stop: async () => { await socket.disconnect(); await runPrime.close?.(); },
-    status: () => ({ connected: true, botUserId: auth.user_id, allowedUsers: parseAllowlist(allowedUsers)?.size ?? "all", ...gateway.status() }),
+    stop: async () => {
+      try { await socket.disconnect(); } finally {
+        toolMessages.clear();
+        await runPrime.close?.();
+      }
+    },
+    status: () => ({ connected: Boolean(socket.websocket), botUserId: auth.user_id, allowedUsers: parseAllowlist(allowedUsers)?.size ?? "all", ...gateway.status() }),
   };
 }

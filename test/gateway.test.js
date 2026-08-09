@@ -99,6 +99,17 @@ test("serializes concurrent turns within one Slack thread", async () => {
   assert.equal(posted.length, 2);
 });
 
+test("posts a safe error reply when a thread turn fails", async () => {
+  const posted = [];
+  const q = new ThreadQueue({ concurrency: 1, handler: async () => { throw new Error("worker failed /Users/jachinshen/.prime/x"); } });
+  const g = createGateway({ botUserId: "B1", allowlist: new Set(["U1"]), queue: q, runPrime: async () => "unused", post: async x => posted.push(x) });
+  const result = await g.onMessage({ user: "U1", channel: "C1", ts: "30", text: "<@B1> fail" });
+  assert.equal(result.failed, true);
+  assert.match(posted[0].text, /Prime Agent failed: worker failed/);
+  assert.doesNotMatch(posted[0].text, /Users\/jachinshen/);
+  assert.equal(g.status().failed, 1);
+});
+
 test("queue limits parallel work", async () => {
   let active=0, peak=0;
   const q = new ThreadQueue({ concurrency: 2, handler: async () => { active++; peak=Math.max(peak,active); await new Promise(r=>setTimeout(r,10)); active--; return "ok"; } });

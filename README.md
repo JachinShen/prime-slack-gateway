@@ -79,4 +79,4 @@ The test suite covers config security, mention admission, direct Socket Mode eve
 
 ## Current limitations
 
-Message edits/deletes, file transfer, durable event-id deduplication, retry/dead-letter persistence, and Slack rate-limit backoff are not implemented. Tool updates intentionally show tool names and status only, not raw arguments, to reduce accidental secret exposure.
+Message edits/deletes, file transfer, durable event-id deduplication, retry/dead-letter persistence, and Slack rate-limit backoff are not implemented. Tool updates intentionally show tool names and status only, not raw arguments, to reduce accidental secret exposure. Runtime failures now produce a safe error reply in the originating Thread, and Gateway shutdown closes the Socket Mode client and per-thread RPC processes.
