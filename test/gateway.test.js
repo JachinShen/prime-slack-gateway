@@ -79,6 +79,16 @@ test("registers Socket Mode direct message and app_mention events", async () => 
 });
 
 
+test("deduplicates the same Slack message across event types and retries", async () => {
+  let runs = 0;
+  const q = new ThreadQueue({ concurrency: 1, handler: async () => { runs++; return "ok"; } });
+  const g = createGateway({ botUserId: "B1", allowlist: new Set(["U1"]), queue: q, runPrime: async () => "unused", post: async () => {} });
+  const event = { user: "U1", team: "T1", channel: "C1", ts: "35", text: "<@B1> once" };
+  const results = await Promise.all([g.onMessage(event), g.onMessage({ ...event, type: "app_mention" })]);
+  assert.equal(runs, 1);
+  assert.equal(results.filter(result => result.ignored === "duplicate-event").length, 1);
+});
+
 test("serializes concurrent turns within one Slack thread", async () => {
   let active = 0;
   let peak = 0;

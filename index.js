@@ -323,10 +323,11 @@ function formatGatewayError(error) {
     .slice(0, 500);
 }
 
-export function createGateway({ botUserId, allowlist, queue, runPrime, post, logger = () => {}, processingReaction, requireThreadReplies = true }) {
+export function createGateway({ botUserId, allowlist, queue, runPrime, post, logger = () => {}, processingReaction, dedupeTtlMs = 5 * 60_000, requireThreadReplies = true }) {
   if (!botUserId || !queue || !runPrime || !post) throw new Error("botUserId, queue, runPrime, and post are required");
   const sessions = new Set();
   const keyTails = new Map();
+  const seenEvents = new Map();
   const stats = { received: 0, handled: 0, failed: 0, ignored: 0, ignoredByReason: {}, lastError: null };
   const ignored = reason => {
     stats.ignored++;
@@ -337,6 +338,16 @@ export function createGateway({ botUserId, allowlist, queue, runPrime, post, log
     stats.received++;
     if (!event || event.bot_id || event.subtype === "message_changed") return ignored("bot-or-subtype");
     if (!isAllowed(event.user, allowlist)) return ignored("user-not-allowed");
+    const now = Date.now();
+    for (const [id, timestamp] of seenEvents) if (now - timestamp > dedupeTtlMs) seenEvents.delete(id);
+    // Slack can deliver a channel mention through both `message` and
+    // `app_mention`; channel+ts identifies the original Slack message across
+    // both event types and also absorbs Socket Mode retries.
+    const eventId = event.channel && event.ts
+      ? `${event.team ?? ""}:${event.channel}:${event.ts}`
+      : event.event_id || event.client_msg_id;
+    if (eventId && seenEvents.has(eventId)) return ignored("duplicate-event");
+    if (eventId) seenEvents.set(eventId, now);
     const key = threadKey(event), mentioned = firstMention(event.text, botUserId);
     if (!sessions.has(key) && !mentioned) return ignored("mention-required");
     if (requireThreadReplies && sessions.has(key) && event.thread_ts && event.thread_ts !== key.split(":").pop()) { /* key is stable; no-op */ }
@@ -426,7 +437,8 @@ export async function startSocketGateway(options = {}) {
   const cwd = options.cwd || config.cwd || process.cwd();
   const sessionRoot = options.sessionRoot || config.sessionRoot || path.join(process.env.PRIME_AGENT_HOME || process.env.HOME || cwd, ".prime", "slack-sessions");
   const toolMessages = new Map();
-  const mirrorToolEvent = async (thread, event) => {
+  const toolTails = new Map();
+  const mirrorToolEvent = (thread, event) => {
     if (event.type !== "tool_execution_start" && event.type !== "tool_execution_end") return;
     const parts = String(thread).split(":");
     const channel = parts[1];
@@ -434,21 +446,29 @@ export async function startSocketGateway(options = {}) {
     if (!channel || !threadTs || !event.toolCallId) return;
     const key = `${thread}:${event.toolCallId}`;
     const toolName = String(event.toolName || "tool");
-    if (event.type === "tool_execution_start") {
-      const result = await web.chat.postMessage({ channel, thread_ts: threadTs, text: `🔧 Tool started: \`${toolName}\`` });
-      if (result.ts) toolMessages.set(key, result.ts);
-      return;
-    }
-    const toolTs = toolMessages.get(key);
-    const failed = Boolean(event.isError);
-    const text = `${failed ? "❌" : "✅"} Tool ${failed ? "failed" : "finished"}: \`${toolName}\``;
-    if (toolTs) {
-      await web.chat.update({ channel, ts: toolTs, text });
-      toolMessages.delete(key);
-    } else {
-      await web.chat.postMessage({ channel, thread_ts: threadTs, text });
-    }
+    const previous = toolTails.get(key) || Promise.resolve();
+    const current = previous.catch(() => {}).then(async () => {
+      if (event.type === "tool_execution_start") {
+        const result = await web.chat.postMessage({ channel, thread_ts: threadTs, text: `🔧 Tool started: \`${toolName}\`` });
+        if (result.ts) toolMessages.set(key, result.ts);
+        return;
+      }
+      const toolTs = toolMessages.get(key);
+      const failed = Boolean(event.isError);
+      const text = `${failed ? "❌" : "✅"} Tool ${failed ? "failed" : "finished"}: \`${toolName}\``;
+      if (toolTs) {
+        await web.chat.update({ channel, ts: toolTs, text });
+        toolMessages.delete(key);
+      } else {
+        await web.chat.postMessage({ channel, thread_ts: threadTs, text });
+      }
+    });
+    toolTails.set(key, current);
+    return current.finally(() => {
+      if (toolTails.get(key) === current) toolTails.delete(key);
+    });
   };
+
   const runPrime = options.runPrime || createPrimeRunner({ cwd, sessionRoot, onEvent: mirrorToolEvent });
   const queue = options.queue || new ThreadQueue({ concurrency: options.concurrency ?? config.concurrency ?? 4, handler: ({ key, prompt }) => runPrime(key, prompt) });
   const gateway = createGateway({
@@ -473,6 +493,7 @@ export async function startSocketGateway(options = {}) {
     stop: async () => {
       try { await socket.disconnect(); } finally {
         toolMessages.clear();
+        toolTails.clear();
         await runPrime.close?.();
       }
     },
