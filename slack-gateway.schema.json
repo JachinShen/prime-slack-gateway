@@ -40,6 +40,10 @@
     "sessionRoot": {
       "type": "string",
       "description": "Directory containing isolated Slack thread sessions."
+    },
+    "lockPath": {
+      "type": "string",
+      "description": "Global owner-only lock preventing multiple local Socket Mode clients."
     }
   },
   "required": [

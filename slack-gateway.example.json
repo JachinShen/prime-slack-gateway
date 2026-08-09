@@ -6,5 +6,6 @@
   ],
   "concurrency": 4,
   "cwd": "/Users/you/project",
-  "sessionRoot": "/Users/you/.prime/agent/slack-sessions"
+  "sessionRoot": "/Users/you/.prime/agent/slack-sessions",
+  "lockPath": "/Users/you/.prime/agent/slack-gateway.lock"
 }

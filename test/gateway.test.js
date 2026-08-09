@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { ThreadQueue, buildPrimeRunnerArgs, buildRpcRunnerArgs, createGateway, firstMention, loadGatewayConfig, parseAllowlist, primeSlackGatewayExtension, redactGatewayConfig, registerSocketEventHandlers, stripMention, threadKey } from "../index.js";
+import { ThreadQueue, acquireGatewayLock, buildPrimeRunnerArgs, buildRpcRunnerArgs, createGateway, firstMention, loadGatewayConfig, parseAllowlist, primeSlackGatewayExtension, redactGatewayConfig, registerSocketEventHandlers, stripMention, threadKey } from "../index.js";
 
 test("factory registers an explicit start hook without starting Slack", () => {
   let registration;
@@ -44,6 +44,20 @@ test("loads 0600 config and applies environment overrides without exposing token
   assert.doesNotMatch(JSON.stringify(redacted), /xoxb-test-secret|xapp-test-secret/);
   await chmod(configPath, 0o644);
   await assert.rejects(loadGatewayConfig({ configPath, env: {} }), /mode 0600/);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("global lock rejects a second Gateway and releases safely", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "prime-slack-lock-"));
+  const lockPath = path.join(dir, "gateway.lock");
+  const release = await acquireGatewayLock(lockPath);
+  try {
+    await assert.rejects(() => acquireGatewayLock(lockPath), /already running/);
+  } finally {
+    await release();
+  }
+  const releaseAgain = await acquireGatewayLock(lockPath);
+  await releaseAgain();
   await rm(dir, { recursive: true, force: true });
 });
 

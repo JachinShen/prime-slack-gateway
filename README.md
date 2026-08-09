@@ -12,6 +12,7 @@ A small, Prime Agent 0.7-native Slack Socket Mode adapter.
 - A temporary `hourglass_flowing_sand` reaction marks each incoming message as processing.
 - Tool activity is mirrored into the Slack thread as start/finish updates.
 - Explicit start, status, and stop commands.
+- A global owner-only lock prevents multiple local Socket Mode clients.
 - Owner-only config validation (`0600`) and fail-closed user allowlist.
 - No Pinet dependency and no second Pi Core dependency.
 
@@ -65,7 +66,7 @@ The bot must be invited to the target channel. The allowlist is checked against 
 
 ## Configuration
 
-See [`slack-gateway.schema.json`](./slack-gateway.schema.json) and [`slack-gateway.example.json`](./slack-gateway.example.json). Supported environment overrides include `PRIME_SLACK_CONFIG`, `PRIME_SLACK_BOT_TOKEN`, `PRIME_SLACK_APP_TOKEN`, `PRIME_SLACK_ALLOWED_USERS`, `PRIME_SLACK_CONCURRENCY`, `PRIME_SLACK_CWD`, and `PRIME_SLACK_SESSION_ROOT`.
+See [`slack-gateway.schema.json`](./slack-gateway.schema.json) and [`slack-gateway.example.json`](./slack-gateway.example.json). Supported environment overrides include `PRIME_SLACK_CONFIG`, `PRIME_SLACK_BOT_TOKEN`, `PRIME_SLACK_APP_TOKEN`, `PRIME_SLACK_ALLOWED_USERS`, `PRIME_SLACK_CONCURRENCY`, `PRIME_SLACK_CWD`, `PRIME_SLACK_SESSION_ROOT`, and `PRIME_SLACK_LOCK_PATH`.
 
 Never commit `slack-gateway.json`, tokens, or session directories.
 

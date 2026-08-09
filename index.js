@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, open, readFile, stat, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 const DEFAULT_CONFIG_FILENAME = "slack-gateway.json";
@@ -20,11 +21,11 @@ function validateConfig(config, source) {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new Error(`Slack Gateway config must be a JSON object (${source})`);
   }
-  const allowed = new Set(["botToken", "appToken", "allowedUsers", "concurrency", "cwd", "sessionRoot"]);
+  const allowed = new Set(["botToken", "appToken", "allowedUsers", "concurrency", "cwd", "sessionRoot", "lockPath"]);
   for (const key of Object.keys(config)) {
     if (!allowed.has(key)) throw new Error(`Unknown Slack Gateway config field: ${key}`);
   }
-  for (const key of ["botToken", "appToken", "cwd", "sessionRoot"]) {
+  for (const key of ["botToken", "appToken", "cwd", "sessionRoot", "lockPath"]) {
     if (config[key] !== undefined && (typeof config[key] !== "string" || !config[key].trim())) {
       throw new Error(`Slack Gateway config field ${key} must be a non-empty string`);
     }
@@ -77,6 +78,7 @@ export async function loadGatewayConfig({ configPath, env = process.env, homeDir
     ["allowedUsers", ["PRIME_SLACK_ALLOWED_USERS"]],
     ["cwd", ["PRIME_SLACK_CWD"]],
     ["sessionRoot", ["PRIME_SLACK_SESSION_ROOT"]],
+    ["lockPath", ["PRIME_SLACK_LOCK_PATH"]],
   ];
   for (const [key, names] of overrides) {
     const value = envValue(env, ...names);
@@ -89,6 +91,54 @@ export async function loadGatewayConfig({ configPath, env = process.env, homeDir
     config.concurrency = parsed;
   }
   return validateConfig(config, filePath);
+}
+
+/**
+ * Acquire a host-wide singleton lock so multiple Prime Agent sessions cannot
+ * create multiple Slack Socket Mode clients with the same credentials.
+ */
+export async function acquireGatewayLock(lockPath) {
+  if (!lockPath || typeof lockPath !== "string") throw new Error("lockPath is required");
+  await mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  const owner = randomUUID();
+  const payload = JSON.stringify({ pid: process.pid, owner, startedAt: new Date().toISOString() });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      try { await handle.writeFile(payload, "utf8"); } finally { await handle.close(); }
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        try {
+          const current = JSON.parse(await readFile(lockPath, "utf8"));
+          if (current.owner === owner) await unlink(lockPath);
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let existing;
+      try {
+        existing = JSON.parse(await readFile(lockPath, "utf8"));
+      } catch {
+        throw new Error(`Slack Gateway lock exists and cannot be validated: ${lockPath}`);
+      }
+      const pid = Number(existing?.pid);
+      let alive = pid > 0 && pid !== process.pid;
+      if (alive) {
+        try { process.kill(pid, 0); } catch (probeError) { alive = probeError?.code !== "ESRCH"; }
+      }
+      if (alive || pid === process.pid) {
+        throw new Error(`Slack Gateway is already running (pid ${pid})`);
+      }
+      try { await unlink(lockPath); } catch (removeError) {
+        if (removeError?.code !== "ENOENT") continue;
+      }
+    }
+  }
+  throw new Error(`Slack Gateway lock is busy: ${lockPath}`);
 }
 
 /**
@@ -430,73 +480,88 @@ export async function startSocketGateway(options = {}) {
   const botToken = options.botToken ?? config.botToken;
   const allowedUsers = options.allowedUsers ?? config.allowedUsers;
   if (!appToken || !botToken) throw new Error("SLACK_APP_TOKEN and SLACK_BOT_TOKEN are required");
-  const [{ SocketModeClient }, { WebClient }] = await Promise.all([import("@slack/socket-mode"), import("@slack/web-api")]);
-  const socket = new SocketModeClient({ appToken });
-  const web = new WebClient(botToken);
-  const auth = await web.auth.test();
   const cwd = options.cwd || config.cwd || process.cwd();
   const sessionRoot = options.sessionRoot || config.sessionRoot || path.join(process.env.PRIME_AGENT_HOME || process.env.HOME || cwd, ".prime", "slack-sessions");
-  const toolMessages = new Map();
-  const toolTails = new Map();
-  const mirrorToolEvent = (thread, event) => {
-    if (event.type !== "tool_execution_start" && event.type !== "tool_execution_end") return;
-    const parts = String(thread).split(":");
-    const channel = parts[1];
-    const threadTs = parts.slice(2).join(":");
-    if (!channel || !threadTs || !event.toolCallId) return;
-    const key = `${thread}:${event.toolCallId}`;
-    const toolName = String(event.toolName || "tool");
-    const previous = toolTails.get(key) || Promise.resolve();
-    const current = previous.catch(() => {}).then(async () => {
-      if (event.type === "tool_execution_start") {
-        const result = await web.chat.postMessage({ channel, thread_ts: threadTs, text: `🔧 Tool started: \`${toolName}\`` });
-        if (result.ts) toolMessages.set(key, result.ts);
-        return;
-      }
-      const toolTs = toolMessages.get(key);
-      const failed = Boolean(event.isError);
-      const text = `${failed ? "❌" : "✅"} Tool ${failed ? "failed" : "finished"}: \`${toolName}\``;
-      if (toolTs) {
-        await web.chat.update({ channel, ts: toolTs, text });
-        toolMessages.delete(key);
-      } else {
-        await web.chat.postMessage({ channel, thread_ts: threadTs, text });
-      }
-    });
-    toolTails.set(key, current);
-    return current.finally(() => {
-      if (toolTails.get(key) === current) toolTails.delete(key);
-    });
-  };
+  const agentHome = process.env.PRIME_AGENT_HOME || path.join(process.env.HOME || process.env.USERPROFILE || cwd, ".prime", "agent");
+  const lockPath = options.lockPath || config.lockPath || path.join(agentHome, "slack-gateway.lock");
+  const releaseLock = await acquireGatewayLock(lockPath);
+  let socket;
+  let runPrime;
+  try {
+    const [{ SocketModeClient }, { WebClient }] = await Promise.all([import("@slack/socket-mode"), import("@slack/web-api")]);
+    socket = new SocketModeClient({ appToken });
+    const web = new WebClient(botToken);
+    const auth = await web.auth.test();
+    const toolMessages = new Map();
+    const toolTails = new Map();
+    const mirrorToolEvent = (thread, event) => {
+      if (event.type !== "tool_execution_start" && event.type !== "tool_execution_end") return;
+      const parts = String(thread).split(":");
+      const channel = parts[1];
+      const threadTs = parts.slice(2).join(":");
+      if (!channel || !threadTs || !event.toolCallId) return;
+      const key = `${thread}:${event.toolCallId}`;
+      const toolName = String(event.toolName || "tool");
+      const previous = toolTails.get(key) || Promise.resolve();
+      const current = previous.catch(() => {}).then(async () => {
+        if (event.type === "tool_execution_start") {
+          const result = await web.chat.postMessage({ channel, thread_ts: threadTs, text: `🔧 Tool started: \`${toolName}\`` });
+          if (result.ts) toolMessages.set(key, result.ts);
+          return;
+        }
+        const toolTs = toolMessages.get(key);
+        const failed = Boolean(event.isError);
+        const text = `${failed ? "❌" : "✅"} Tool ${failed ? "failed" : "finished"}: \`${toolName}\``;
+        if (toolTs) {
+          await web.chat.update({ channel, ts: toolTs, text });
+          toolMessages.delete(key);
+        } else {
+          await web.chat.postMessage({ channel, thread_ts: threadTs, text });
+        }
+      });
+      toolTails.set(key, current);
+      return current.finally(() => {
+        if (toolTails.get(key) === current) toolTails.delete(key);
+      });
+    };
 
-  const runPrime = options.runPrime || createPrimeRunner({ cwd, sessionRoot, onEvent: mirrorToolEvent });
-  const queue = options.queue || new ThreadQueue({ concurrency: options.concurrency ?? config.concurrency ?? 4, handler: ({ key, prompt }) => runPrime(key, prompt) });
-  const gateway = createGateway({
-    ...options,
-    botUserId: options.botUserId || auth.user_id,
-    allowlist: parseAllowlist(allowedUsers),
-    queue,
-    post: message => web.chat.postMessage(message),
-    runPrime,
-    processingReaction: ({ channel, timestamp, active }) =>
-      web.reactions[active ? "add" : "remove"]({
-        channel,
-        timestamp,
-        name: "hourglass_flowing_sand",
-      }),
-  });
-  registerSocketEventHandlers(socket, gateway, options.logger);
-  await socket.start();
-  return {
-    socket,
-    gateway,
-    stop: async () => {
-      try { await socket.disconnect(); } finally {
-        toolMessages.clear();
-        toolTails.clear();
-        await runPrime.close?.();
-      }
-    },
-    status: () => ({ connected: Boolean(socket.websocket), botUserId: auth.user_id, allowedUsers: parseAllowlist(allowedUsers)?.size ?? "all", ...gateway.status() }),
-  };
+    runPrime = options.runPrime || createPrimeRunner({ cwd, sessionRoot, onEvent: mirrorToolEvent });
+    const queue = options.queue || new ThreadQueue({ concurrency: options.concurrency ?? config.concurrency ?? 4, handler: ({ key, prompt }) => runPrime(key, prompt) });
+    const gateway = createGateway({
+      ...options,
+      botUserId: options.botUserId || auth.user_id,
+      allowlist: parseAllowlist(allowedUsers),
+      queue,
+      post: message => web.chat.postMessage(message),
+      runPrime,
+      processingReaction: ({ channel, timestamp, active }) =>
+        web.reactions[active ? "add" : "remove"]({
+          channel,
+          timestamp,
+          name: "hourglass_flowing_sand",
+        }),
+    });
+    registerSocketEventHandlers(socket, gateway, options.logger);
+    await socket.start();
+    let stopped = false;
+    return {
+      socket,
+      gateway,
+      stop: async () => {
+        if (stopped) return;
+        stopped = true;
+        try { await socket.disconnect(); } finally {
+          toolMessages.clear();
+          toolTails.clear();
+          try { await runPrime.close?.(); } finally { await releaseLock(); }
+        }
+      },
+      status: () => ({ connected: Boolean(socket.websocket), botUserId: auth.user_id, lockPath, allowedUsers: parseAllowlist(allowedUsers)?.size ?? "all", ...gateway.status() }),
+    };
+  } catch (error) {
+    try { await socket?.disconnect?.(); } catch { /* best-effort startup cleanup */ }
+    try { await runPrime?.close?.(); } catch { /* best-effort startup cleanup */ }
+    try { await releaseLock(); } catch { /* preserve the startup error */ }
+    throw error;
+  }
 }
